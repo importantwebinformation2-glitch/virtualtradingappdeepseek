@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Virtual Trading Pro</title>
+    <title>📈 Virtual Trading Pro</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -14,12 +14,28 @@
         .dark { background: #1a1a2e; color: white; }
         .dark .bg-white { background: #16213e; }
         .dark .border { border-color: #0f3460; }
+        .dark .bg-gray-50 { background: #1f2937; }
+        .dark .text-gray-500 { color: #9ca3af; }
+        /* Loading animation */
+        .loader {
+            border: 4px solid #f3f4f6;
+            border-top: 4px solid #2563eb;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 20px auto;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
     </style>
 </head>
 <body>
     <div id="root"></div>
     <script type="text/babel">
-        const { useState, useEffect, useRef, useCallback } = React;
+        const { useState, useEffect, useRef } = React;
 
         const DEFAULT_BALANCE = 100000;
         const INITIAL_STOCKS = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA', 'META', 'NVDA', 'JPM', 'VTI', 'SPY'];
@@ -44,11 +60,8 @@
             const [quantity, setQuantity] = useState(1);
             const [tradeType, setTradeType] = useState('equity');
             const [todayPL, setTodayPL] = useState({ equity: 0, intraday: 0, options: 0 });
-            const [loading, setLoading] = useState(false);
-            const [chartData, setChartData] = useState([]);
-            const [chartPeriod, setChartPeriod] = useState('1D');
+            const [loading, setLoading] = useState(true);
             const [optionLotSizes, setOptionLotSizes] = useState({});
-            const [wsConnected, setWsConnected] = useState(false);
             const [darkMode, setDarkMode] = useState(() => {
                 return localStorage.getItem('darkMode') === 'true';
             });
@@ -56,7 +69,8 @@
             const [takeProfit, setTakeProfit] = useState('');
             const [activeOrders, setActiveOrders] = useState([]);
             const [showOrders, setShowOrders] = useState(false);
-            const wsRef = useRef(null);
+            const [error, setError] = useState(null);
+            const [marketStatus, setMarketStatus] = useState('Loading...');
 
             // Apply dark mode
             useEffect(() => {
@@ -94,8 +108,8 @@
                         const data = res.data.chart.result[0];
                         const meta = data.meta;
                         const quote = data.indicators.quote[0];
-                        const lastPrice = quote.close[quote.close.length - 1] || meta.previousClose;
-                        const open = quote.open[0] || meta.previousClose;
+                        const lastPrice = quote.close[quote.close.length - 1] || meta.regularMarketPrice || meta.previousClose;
+                        const open = quote.open[0] || meta.regularMarketOpen || meta.previousClose;
                         return {
                             symbol: symbols[idx],
                             price: lastPrice,
@@ -109,15 +123,17 @@
                     });
                 } catch (error) {
                     console.error('Error fetching prices:', error);
+                    setError('Failed to fetch stock prices. Using demo data.');
+                    // Return demo data
                     return symbols.map(sym => ({
                         symbol: sym,
-                        price: 0,
-                        open: 0,
-                        change: '0',
+                        price: Math.random() * 500 + 50,
+                        open: Math.random() * 500 + 50,
+                        change: (Math.random() * 10 - 5).toFixed(2),
                         name: sym,
-                        high: 0,
-                        low: 0,
-                        volume: 0,
+                        high: Math.random() * 500 + 100,
+                        low: Math.random() * 500 + 20,
+                        volume: Math.floor(Math.random() * 1000000),
                     }));
                 }
             };
@@ -126,11 +142,30 @@
             useEffect(() => {
                 const loadStocks = async () => {
                     setLoading(true);
-                    const data = await fetchPrices(INITIAL_STOCKS);
-                    setStocks(data);
+                    setError(null);
+                    try {
+                        const data = await fetchPrices(INITIAL_STOCKS);
+                        setStocks(data);
+                        setMarketStatus('Market Open');
+                    } catch (err) {
+                        setError('Error loading stocks. Please refresh.');
+                    }
                     setLoading(false);
                 };
                 loadStocks();
+                
+                // Refresh every 30 seconds
+                const interval = setInterval(() => {
+                    if (stocks.length > 0) {
+                        const symbols = stocks.map(s => s.symbol);
+                        fetchPrices(symbols).then(data => {
+                            setStocks(data);
+                            calculateTodayPL(data);
+                        });
+                    }
+                }, 30000);
+                
+                return () => clearInterval(interval);
             }, []);
 
             // Calculate P&L
@@ -166,14 +201,24 @@
             const handleSearch = async () => {
                 if (!search.trim()) return;
                 setLoading(true);
-                const data = await fetchPrices([search.toUpperCase()]);
-                if (data[0] && data[0].price > 0) {
-                    setStocks(prev => {
-                        const exists = prev.some(s => s.symbol === data[0].symbol);
-                        return exists ? prev : [...prev, data[0]];
-                    });
-                } else {
-                    alert('Stock not found or invalid symbol');
+                try {
+                    const data = await fetchPrices([search.toUpperCase()]);
+                    if (data[0] && data[0].price > 0) {
+                        setStocks(prev => {
+                            const exists = prev.some(s => s.symbol === data[0].symbol);
+                            return exists ? prev : [...prev, data[0]];
+                        });
+                        // Fetch option lot size
+                        try {
+                            const optRes = await axios.get(`https://query1.finance.yahoo.com/v7/finance/options/${data[0].symbol}`);
+                            const lotSize = optRes.data.optionChain?.result?.[0]?.contractSize || 100;
+                            setOptionLotSizes(prev => ({ ...prev, [data[0].symbol]: lotSize }));
+                        } catch (e) {}
+                    } else {
+                        alert('Stock not found or invalid symbol');
+                    }
+                } catch (err) {
+                    alert('Error searching for stock');
                 }
                 setSearch('');
                 setLoading(false);
@@ -181,13 +226,22 @@
 
             // Trade execution
             const handleTrade = async (type) => {
-                if (!selectedStock) return;
+                if (!selectedStock) {
+                    alert('Please select a stock first');
+                    return;
+                }
                 const stock = stocks.find(s => s.symbol === selectedStock);
-                if (!stock) return;
+                if (!stock || stock.price === 0) {
+                    alert('Stock price not available');
+                    return;
+                }
 
                 const price = stock.price;
                 const qty = parseInt(quantity);
-                if (qty <= 0) return;
+                if (qty <= 0 || isNaN(qty)) {
+                    alert('Please enter a valid quantity');
+                    return;
+                }
 
                 let lotSize = tradeType === 'options' ? (optionLotSizes[stock.symbol] || 100) : 1;
                 let cost = price * qty * lotSize;
@@ -216,31 +270,27 @@
                     }));
                     
                     // Add stop-loss/take-profit orders
-                    if (sl > 0 || tp > 0) {
-                        const newOrders = [];
-                        if (sl > 0 && sl < price) {
-                            newOrders.push({
-                                symbol: stock.symbol,
-                                type: 'stop_loss',
-                                price: sl,
-                                quantity: qty,
-                                tradeType: tradeType,
-                                status: 'active',
-                                createdAt: new Date().toISOString(),
-                            });
-                        }
-                        if (tp > 0 && tp > price) {
-                            newOrders.push({
-                                symbol: stock.symbol,
-                                type: 'take_profit',
-                                price: tp,
-                                quantity: qty,
-                                tradeType: tradeType,
-                                status: 'active',
-                                createdAt: new Date().toISOString(),
-                            });
-                        }
-                        setActiveOrders(prev => [...prev, ...newOrders]);
+                    if (!isNaN(sl) && sl > 0 && sl < price) {
+                        setActiveOrders(prev => [...prev, {
+                            symbol: stock.symbol,
+                            type: 'stop_loss',
+                            price: sl,
+                            quantity: qty,
+                            tradeType: tradeType,
+                            status: 'active',
+                            createdAt: new Date().toISOString(),
+                        }]);
+                    }
+                    if (!isNaN(tp) && tp > 0 && tp > price) {
+                        setActiveOrders(prev => [...prev, {
+                            symbol: stock.symbol,
+                            type: 'take_profit',
+                            price: tp,
+                            quantity: qty,
+                            tradeType: tradeType,
+                            status: 'active',
+                            createdAt: new Date().toISOString(),
+                        }]);
                     }
                     
                     setTransactions(prev => [
@@ -249,18 +299,19 @@
                             type: 'BUY', 
                             symbol: stock.symbol, 
                             qty, 
-                            price, 
-                            cost, 
+                            price: price.toFixed(2), 
+                            cost: cost.toFixed(2), 
                             tradeType,
                             leverage: tradeType === 'intraday' ? `${INTRADAY_LEVERAGE}x` : '1x',
-                            stopLoss: sl || 'N/A',
-                            takeProfit: tp || 'N/A',
+                            stopLoss: (!isNaN(sl) && sl > 0) ? sl : 'N/A',
+                            takeProfit: (!isNaN(tp) && tp > 0) ? tp : 'N/A',
                             time: new Date().toLocaleTimeString() 
                         },
                     ]);
                     
                     setStopLoss('');
                     setTakeProfit('');
+                    alert(`✅ Bought ${qty} ${stock.symbol} at $${price.toFixed(2)}`);
                 } else if (type === 'sell') {
                     const portfolioKey = tradeType === 'options' ? 'options' : tradeType;
                     const held = portfolio[portfolioKey][stock.symbol] || 0;
@@ -291,13 +342,14 @@
                             type: 'SELL', 
                             symbol: stock.symbol, 
                             qty, 
-                            price, 
-                            cost, 
+                            price: price.toFixed(2), 
+                            cost: cost.toFixed(2), 
                             tradeType,
                             leverage: tradeType === 'intraday' ? `${INTRADAY_LEVERAGE}x` : '1x',
                             time: new Date().toLocaleTimeString() 
                         },
                     ]);
+                    alert(`✅ Sold ${qty} ${stock.symbol} at $${price.toFixed(2)}`);
                 }
                 calculateTodayPL(stocks);
             };
@@ -317,9 +369,9 @@
                     return;
                 }
                 
-                const headers = ['Type', 'Symbol', 'Quantity', 'Price', 'Cost', 'Trade Type', 'Leverage', 'Time'];
+                const headers = ['Type', 'Symbol', 'Quantity', 'Price', 'Cost', 'Trade Type', 'Leverage', 'SL', 'TP', 'Time'];
                 const csvData = transactions.map(t => 
-                    [t.type, t.symbol, t.qty, t.price.toFixed(2), t.cost.toFixed(2), t.tradeType, t.leverage || '1x', t.time]
+                    [t.type, t.symbol, t.qty, t.price, t.cost, t.tradeType, t.leverage || '1x', t.stopLoss || 'N/A', t.takeProfit || 'N/A', t.time]
                 );
                 
                 const csvContent = [headers.join(','), ...csvData.map(row => row.join(','))].join('\n');
@@ -332,14 +384,18 @@
                 window.URL.revokeObjectURL(url);
             };
 
-            // Select stock
-            const selectStock = (symbol) => {
-                setSelectedStock(symbol);
-                setStopLoss('');
-                setTakeProfit('');
-            };
-
             const totalPL = todayPL.equity + todayPL.intraday + todayPL.options;
+
+            if (loading && stocks.length === 0) {
+                return (
+                    <div className="flex items-center justify-center min-h-screen">
+                        <div className="text-center">
+                            <div className="loader"></div>
+                            <p className="mt-4 text-gray-600">Loading stocks...</p>
+                        </div>
+                    </div>
+                );
+            }
 
             return (
                 <div className={`min-h-screen ${darkMode ? 'dark bg-dark-bg' : 'bg-gray-100'} p-2 md:p-4`}>
@@ -365,13 +421,11 @@
                             </div>
                         </div>
 
-                        {/* Status */}
+                        {/* Status & Market */}
                         <div className="bg-white dark:bg-dark-card p-3 rounded-lg shadow mb-4 flex flex-wrap items-center gap-4">
                             <div className="flex items-center gap-2 text-sm">
-                                <span className="font-bold">🔌 WS:</span>
-                                <span className={wsConnected ? 'text-green-600' : 'text-red-600'}>
-                                    {wsConnected ? '🟢' : '🔴'}
-                                </span>
+                                <span className="font-bold">📊 Market:</span>
+                                <span className="text-green-600 font-bold">{marketStatus}</span>
                             </div>
                             <div className="flex items-center gap-2 text-sm">
                                 <span className="font-bold">⚡ Leverage:</span>
@@ -383,6 +437,7 @@
                             >
                                 📋 Orders ({activeOrders.filter(o => o.status === 'active').length})
                             </button>
+                            {error && <span className="text-red-500 text-sm">{error}</span>}
                         </div>
 
                         {/* Balance & P&L */}
@@ -463,7 +518,7 @@
                             <div className="flex gap-2">
                                 <input
                                     type="text"
-                                    placeholder="Search stock (e.g., TSLA)"
+                                    placeholder="Search stock (e.g., TSLA, AAPL)"
                                     value={search}
                                     onChange={(e) => setSearch(e.target.value)}
                                     onKeyPress={(e) => e.key === 'Enter' && handleSearch()}
@@ -473,15 +528,14 @@
                                     onClick={handleSearch}
                                     className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 text-sm whitespace-nowrap"
                                 >
-                                    Add Stock
+                                    + Add Stock
                                 </button>
                             </div>
                         </div>
 
                         {/* Stock List */}
                         <div className="bg-white dark:bg-dark-card p-4 rounded-lg shadow mb-4 overflow-x-auto">
-                            <h2 className="text-xl font-semibold mb-2">📋 Stocks</h2>
-                            {loading && <p>Loading...</p>}
+                            <h2 className="text-xl font-semibold mb-2">📋 Available Stocks</h2>
                             <div className="min-w-[600px] md:min-w-full">
                                 <table className="w-full text-xs md:text-sm">
                                     <thead className="bg-gray-50 dark:bg-gray-800">
@@ -497,16 +551,20 @@
                                         {stocks.map((stock) => (
                                             <tr key={stock.symbol} className="border-b dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800">
                                                 <td className="p-2 font-bold">{stock.symbol}</td>
-                                                <td className="p-2">${stock.price.toFixed(2)}</td>
+                                                <td className="p-2 font-mono">${stock.price.toFixed(2)}</td>
                                                 <td className={`p-2 ${stock.change >= 0 ? 'text-green-600' : 'text-red-600'}`}>
                                                     {stock.change}%
                                                 </td>
                                                 <td className="p-2 hidden md:table-cell font-bold text-blue-600">
-                                                    {optionLotSizes[stock.symbol] || 'N/A'}
+                                                    {optionLotSizes[stock.symbol] || '100'}
                                                 </td>
                                                 <td className="p-2">
                                                     <button
-                                                        onClick={() => selectStock(stock.symbol)}
+                                                        onClick={() => {
+                                                            setSelectedStock(stock.symbol);
+                                                            setStopLoss('');
+                                                            setTakeProfit('');
+                                                        }}
                                                         className="bg-blue-500 text-white px-2 py-1 md:px-3 md:py-1 rounded hover:bg-blue-600 text-xs"
                                                     >
                                                         Trade
@@ -519,15 +577,31 @@
                             </div>
                         </div>
 
-                        {/* Trade Panel */}
+                        {/* Trade Panel - This is where you buy/sell */}
                         {selectedStock && (
                             <div className="bg-white dark:bg-dark-card p-4 rounded-lg shadow mb-4 border-2 border-blue-200 dark:border-blue-800">
-                                <h2 className="text-xl font-semibold mb-2">
-                                    Trade {selectedStock} (${stocks.find(s => s.symbol === selectedStock)?.price.toFixed(2) || '?'})
-                                </h2>
+                                <div className="flex justify-between items-center mb-2">
+                                    <h2 className="text-xl font-semibold">
+                                        Trade {selectedStock}
+                                    </h2>
+                                    <button
+                                        onClick={() => setSelectedStock(null)}
+                                        className="text-gray-500 hover:text-gray-700"
+                                    >
+                                        ✕ Close
+                                    </button>
+                                </div>
+                                
+                                <div className="mb-2">
+                                    <span className="text-sm text-gray-500">Current Price: </span>
+                                    <span className="text-lg font-bold">
+                                        ${stocks.find(s => s.symbol === selectedStock)?.price.toFixed(2) || '0.00'}
+                                    </span>
+                                </div>
+
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                                     <div>
-                                        <label className="block text-sm font-medium">Quantity</label>
+                                        <label className="block text-sm font-medium mb-1">📦 Quantity</label>
                                         <input
                                             type="number"
                                             min="1"
@@ -537,19 +611,19 @@
                                         />
                                     </div>
                                     <div>
-                                        <label className="block text-sm font-medium">Trade Type</label>
+                                        <label className="block text-sm font-medium mb-1">📊 Trade Type</label>
                                         <select
                                             value={tradeType}
                                             onChange={(e) => setTradeType(e.target.value)}
                                             className="w-full border dark:bg-gray-800 dark:border-gray-700 p-2 rounded"
                                         >
-                                            <option value="equity">Equity (1x)</option>
-                                            <option value="intraday">Intraday (5x)</option>
-                                            <option value="options">Options (Lot: {optionLotSizes[selectedStock] || 100})</option>
+                                            <option value="equity">📈 Equity (1x)</option>
+                                            <option value="intraday">⚡ Intraday ({INTRADAY_LEVERAGE}x leverage)</option>
+                                            <option value="options">📄 Options (Lot: {optionLotSizes[selectedStock] || 100})</option>
                                         </select>
                                     </div>
                                     <div>
-                                        <label className="block text-sm font-medium">Stop Loss ($)</label>
+                                        <label className="block text-sm font-medium mb-1">🛑 Stop Loss ($)</label>
                                         <input
                                             type="number"
                                             placeholder="E.g., 150"
@@ -559,7 +633,7 @@
                                         />
                                     </div>
                                     <div>
-                                        <label className="block text-sm font-medium">Take Profit ($)</label>
+                                        <label className="block text-sm font-medium mb-1">🎯 Take Profit ($)</label>
                                         <input
                                             type="number"
                                             placeholder="E.g., 200"
@@ -569,92 +643,103 @@
                                         />
                                     </div>
                                 </div>
-                                <div className="mt-2">
-                                    <div className="bg-gray-50 dark:bg-gray-800 p-2 rounded text-sm">
-                                        <span className="font-bold">Estimated Cost: </span>
-                                        ${(() => {
-                                            const price = stocks.find(s => s.symbol === selectedStock)?.price || 0;
-                                            const qty = parseInt(quantity) || 0;
-                                            let cost = price * qty;
-                                            if (tradeType === 'options') {
-                                                cost = cost * (optionLotSizes[selectedStock] || 100);
-                                            }
-                                            if (tradeType === 'intraday') {
-                                                cost = cost / INTRADAY_LEVERAGE;
-                                            }
-                                            return cost.toFixed(2);
-                                        })()}
+
+                                <div className="mt-3">
+                                    <div className="bg-gray-50 dark:bg-gray-800 p-3 rounded text-sm">
+                                        <div className="flex justify-between">
+                                            <span className="font-bold">Estimated Cost:</span>
+                                            <span className="font-mono">
+                                                ${(() => {
+                                                    const price = stocks.find(s => s.symbol === selectedStock)?.price || 0;
+                                                    const qty = parseInt(quantity) || 0;
+                                                    let cost = price * qty;
+                                                    if (tradeType === 'options') {
+                                                        cost = cost * (optionLotSizes[selectedStock] || 100);
+                                                    }
+                                                    if (tradeType === 'intraday') {
+                                                        cost = cost / INTRADAY_LEVERAGE;
+                                                    }
+                                                    return cost.toFixed(2);
+                                                })()}
+                                            </span>
+                                        </div>
+                                        <div className="flex justify-between mt-1 text-xs text-gray-500">
+                                            <span>Available Balance: ${balance.toFixed(2)}</span>
+                                            <span>Leverage: {tradeType === 'intraday' ? `${INTRADAY_LEVERAGE}x` : '1x'}</span>
+                                        </div>
                                     </div>
                                 </div>
-                                <div className="grid grid-cols-2 gap-2 mt-2">
+
+                                <div className="grid grid-cols-2 gap-3 mt-3">
                                     <button
                                         onClick={() => handleTrade('buy')}
-                                        className="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600"
+                                        className="bg-green-600 hover:bg-green-700 text-white font-bold py-3 rounded transition"
                                     >
-                                        Buy
+                                        🟢 BUY
                                     </button>
                                     <button
                                         onClick={() => handleTrade('sell')}
-                                        className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600"
+                                        className="bg-red-600 hover:bg-red-700 text-white font-bold py-3 rounded transition"
                                     >
-                                        Sell
+                                        🔴 SELL
                                     </button>
                                 </div>
-                                <div className="mt-2 text-sm">
-                                    <div>Held: {portfolio[tradeType === 'options' ? 'options' : tradeType]?.[selectedStock] || 0} units</div>
-                                    {tradeType === 'intraday' && <div className="text-purple-600">⚡ {INTRADAY_LEVERAGE}x Leverage</div>}
-                                    {tradeType === 'options' && <div className="text-blue-600">📦 Lot Size: {optionLotSizes[selectedStock] || 100}</div>}
+
+                                <div className="mt-3 text-sm">
+                                    <div className="flex flex-wrap gap-2">
+                                        <span className="font-bold">Held:</span>
+                                        <span>{portfolio[tradeType === 'options' ? 'options' : tradeType]?.[selectedStock] || 0} units</span>
+                                        {tradeType === 'intraday' && <span className="text-purple-600">⚡ {INTRADAY_LEVERAGE}x Leverage Applied</span>}
+                                        {tradeType === 'options' && <span className="text-blue-600">📦 Lot Size: {optionLotSizes[selectedStock] || 100}</span>}
+                                    </div>
                                     {(stopLoss || takeProfit) && (
-                                        <div className="text-yellow-600">
+                                        <div className="mt-1 text-yellow-600">
                                             🛑 SL: ${stopLoss || 'N/A'} | 🎯 TP: ${takeProfit || 'N/A'}
                                         </div>
                                     )}
                                 </div>
-                                <button
-                                    onClick={() => setSelectedStock(null)}
-                                    className="mt-2 bg-gray-300 dark:bg-gray-700 px-4 py-1 rounded hover:bg-gray-400 dark:hover:bg-gray-600 text-sm"
-                                >
-                                    Close
-                                </button>
                             </div>
                         )}
 
                         {/* Portfolio */}
                         <div className="bg-white dark:bg-dark-card p-4 rounded-lg shadow mb-4">
-                            <h2 className="text-xl font-semibold mb-2">📦 Portfolio</h2>
+                            <h2 className="text-xl font-semibold mb-2">📦 Your Portfolio</h2>
                             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                                <div>
-                                    <h3 className="font-bold text-blue-600">Equity</h3>
+                                <div className="bg-gray-50 dark:bg-gray-800 p-3 rounded">
+                                    <h3 className="font-bold text-blue-600">📈 Equity</h3>
                                     {Object.keys(portfolio.equity).length === 0 ? (
                                         <p className="text-gray-500 text-sm">No holdings</p>
                                     ) : (
                                         Object.entries(portfolio.equity).map(([symbol, qty]) => (
-                                            <div key={symbol} className="bg-gray-50 dark:bg-gray-800 p-2 rounded text-sm mb-1">
-                                                <span className="font-bold">{symbol}</span>: {qty} shares
+                                            <div key={symbol} className="flex justify-between py-1 border-b dark:border-gray-700 text-sm">
+                                                <span className="font-bold">{symbol}</span>
+                                                <span>{qty} shares</span>
                                             </div>
                                         ))
                                     )}
                                 </div>
-                                <div>
-                                    <h3 className="font-bold text-purple-600">Intraday (5x)</h3>
+                                <div className="bg-gray-50 dark:bg-gray-800 p-3 rounded">
+                                    <h3 className="font-bold text-purple-600">⚡ Intraday (5x)</h3>
                                     {Object.keys(portfolio.intraday).length === 0 ? (
                                         <p className="text-gray-500 text-sm">No holdings</p>
                                     ) : (
                                         Object.entries(portfolio.intraday).map(([symbol, qty]) => (
-                                            <div key={symbol} className="bg-gray-50 dark:bg-gray-800 p-2 rounded text-sm mb-1">
-                                                <span className="font-bold">{symbol}</span>: {qty} ⚡
+                                            <div key={symbol} className="flex justify-between py-1 border-b dark:border-gray-700 text-sm">
+                                                <span className="font-bold">{symbol}</span>
+                                                <span>{qty} ⚡</span>
                                             </div>
                                         ))
                                     )}
                                 </div>
-                                <div>
-                                    <h3 className="font-bold text-orange-600">Options</h3>
+                                <div className="bg-gray-50 dark:bg-gray-800 p-3 rounded">
+                                    <h3 className="font-bold text-orange-600">📄 Options</h3>
                                     {Object.keys(portfolio.options).length === 0 ? (
                                         <p className="text-gray-500 text-sm">No holdings</p>
                                     ) : (
                                         Object.entries(portfolio.options).map(([symbol, qty]) => (
-                                            <div key={symbol} className="bg-gray-50 dark:bg-gray-800 p-2 rounded text-sm mb-1">
-                                                <span className="font-bold">{symbol}</span>: {qty} contracts
+                                            <div key={symbol} className="flex justify-between py-1 border-b dark:border-gray-700 text-sm">
+                                                <span className="font-bold">{symbol}</span>
+                                                <span>{qty} contracts</span>
                                             </div>
                                         ))
                                     )}
@@ -664,29 +749,48 @@
 
                         {/* Transactions */}
                         <div className="bg-white dark:bg-dark-card p-4 rounded-lg shadow">
-                            <h2 className="text-xl font-semibold mb-2">📜 Transactions</h2>
+                            <h2 className="text-xl font-semibold mb-2">📜 Transaction History</h2>
                             <div className="max-h-60 overflow-y-auto text-sm">
                                 {transactions.length === 0 ? (
-                                    <p className="text-gray-500">No transactions yet</p>
+                                    <p className="text-gray-500">No transactions yet. Start trading!</p>
                                 ) : (
                                     transactions.slice().reverse().map((t, i) => (
                                         <div key={i} className="border-b dark:border-gray-700 py-2">
                                             <div className="flex flex-wrap gap-2">
-                                                <span className={`font-bold ${t.type === 'BUY' ? 'text-green-600' : t.type === 'SELL' ? 'text-red-600' : 'text-yellow-600'}`}>
+                                                <span className={`font-bold ${t.type === 'BUY' ? 'text-green-600' : 'text-red-600'}`}>
                                                     {t.type}
                                                 </span>
                                                 <span className="font-bold">{t.symbol}</span>
-                                                <span>{t.qty} @ ${t.price.toFixed(2)}</span>
-                                                <span className="text-gray-500">${t.cost.toFixed(2)}</span>
+                                                <span>{t.qty} @ ${t.price}</span>
+                                                <span className="text-gray-500">${t.cost}</span>
                                                 <span className="text-purple-600">{t.tradeType}</span>
                                                 {t.leverage && <span className="text-orange-600">{t.leverage}</span>}
-                                                {t.stopLoss && <span className="text-red-600">SL: ${t.stopLoss}</span>}
-                                                {t.takeProfit && <span className="text-green-600">TP: ${t.takeProfit}</span>}
+                                                {t.stopLoss && t.stopLoss !== 'N/A' && <span className="text-red-600">SL: ${t.stopLoss}</span>}
+                                                {t.takeProfit && t.takeProfit !== 'N/A' && <span className="text-green-600">TP: ${t.takeProfit}</span>}
                                                 <span className="text-gray-400 text-xs">{t.time}</span>
                                             </div>
                                         </div>
                                     ))
                                 )}
+                            </div>
+                        </div>
+
+                        {/* Trading Guide */}
+                        <div className="mt-4 bg-blue-50 dark:bg-blue-900/20 p-4 rounded-lg border border-blue-200 dark:border-blue-800">
+                            <h3 className="font-bold text-blue-600 dark:text-blue-400 mb-2">📖 How to Trade</h3>
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
+                                <div className="bg-white dark:bg-gray-800 p-3 rounded">
+                                    <h4 className="font-bold">📈 Equity Trading</h4>
+                                    <p className="text-gray-600 dark:text-gray-400">Buy/Sell stocks at current price. 1x leverage.</p>
+                                </div>
+                                <div className="bg-white dark:bg-gray-800 p-3 rounded">
+                                    <h4 className="font-bold text-purple-600">⚡ Intraday Trading</h4>
+                                    <p className="text-gray-600 dark:text-gray-400">5x leverage. Higher profit/loss. Must square off same day.</p>
+                                </div>
+                                <div className="bg-white dark:bg-gray-800 p-3 rounded">
+                                    <h4 className="font-bold text-orange-600">📄 Options Trading</h4>
+                                    <p className="text-gray-600 dark:text-gray-400">Trade contracts (lot size varies). Each contract = lot size shares.</p>
+                                </div>
                             </div>
                         </div>
                     </div>
