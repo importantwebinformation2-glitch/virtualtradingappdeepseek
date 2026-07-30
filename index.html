@@ -1,32 +1,700 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Virtual Trading Pro</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
     <style>
-        body { background: #f3f4f6; font-family: system-ui; }
-        .card { background: white; border-radius: 12px; padding: 20px; margin: 12px; }
-        .btn { background: #2563eb; color: white; padding: 8px 16px; border-radius: 6px; }
+        body { background: #f3f4f6; font-family: system-ui, -apple-system, sans-serif; }
+        .dark { background: #1a1a2e; color: white; }
+        .dark .bg-white { background: #16213e; }
+        .dark .border { border-color: #0f3460; }
     </style>
 </head>
 <body>
     <div id="root"></div>
-    <script type="module">
-        // Your app code goes here
-        // (I can provide the complete single-file version if needed)
-        document.getElementById('root').innerHTML = `
-            <div style="padding: 20px; max-width: 500px; margin: auto;">
-                <h1>📈 Virtual Trading Pro</h1>
-                <div class="card">💰 Balance: $100,000.00</div>
-                <div class="card">📊 Today's P&L: $0.00</div>
-                <p style="text-align: center; margin: 20px;">
-                    App loading... Please wait.
-                </p>
-            </div>
-        `;
-        console.log('Trading app loaded!');
+    <script type="text/babel">
+        const { useState, useEffect, useRef, useCallback } = React;
+
+        const DEFAULT_BALANCE = 100000;
+        const INITIAL_STOCKS = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA', 'META', 'NVDA', 'JPM', 'VTI', 'SPY'];
+        const INTRADAY_LEVERAGE = 5;
+
+        function App() {
+            const [balance, setBalance] = useState(() => {
+                const saved = localStorage.getItem('tradingBalance');
+                return saved ? parseFloat(saved) : DEFAULT_BALANCE;
+            });
+            const [stocks, setStocks] = useState([]);
+            const [portfolio, setPortfolio] = useState(() => {
+                const saved = localStorage.getItem('tradingPortfolio');
+                return saved ? JSON.parse(saved) : { equity: {}, intraday: {}, options: {} };
+            });
+            const [transactions, setTransactions] = useState(() => {
+                const saved = localStorage.getItem('tradingTransactions');
+                return saved ? JSON.parse(saved) : [];
+            });
+            const [search, setSearch] = useState('');
+            const [selectedStock, setSelectedStock] = useState(null);
+            const [quantity, setQuantity] = useState(1);
+            const [tradeType, setTradeType] = useState('equity');
+            const [todayPL, setTodayPL] = useState({ equity: 0, intraday: 0, options: 0 });
+            const [loading, setLoading] = useState(false);
+            const [chartData, setChartData] = useState([]);
+            const [chartPeriod, setChartPeriod] = useState('1D');
+            const [optionLotSizes, setOptionLotSizes] = useState({});
+            const [wsConnected, setWsConnected] = useState(false);
+            const [darkMode, setDarkMode] = useState(() => {
+                return localStorage.getItem('darkMode') === 'true';
+            });
+            const [stopLoss, setStopLoss] = useState('');
+            const [takeProfit, setTakeProfit] = useState('');
+            const [activeOrders, setActiveOrders] = useState([]);
+            const [showOrders, setShowOrders] = useState(false);
+            const wsRef = useRef(null);
+
+            // Apply dark mode
+            useEffect(() => {
+                if (darkMode) {
+                    document.documentElement.classList.add('dark');
+                    localStorage.setItem('darkMode', 'true');
+                } else {
+                    document.documentElement.classList.remove('dark');
+                    localStorage.setItem('darkMode', 'false');
+                }
+            }, [darkMode]);
+
+            // Save to localStorage
+            useEffect(() => {
+                localStorage.setItem('tradingBalance', balance.toString());
+            }, [balance]);
+
+            useEffect(() => {
+                localStorage.setItem('tradingPortfolio', JSON.stringify(portfolio));
+            }, [portfolio]);
+
+            useEffect(() => {
+                localStorage.setItem('tradingTransactions', JSON.stringify(transactions));
+            }, [transactions]);
+
+            // Fetch prices
+            const fetchPrices = async (symbols) => {
+                try {
+                    const responses = await Promise.all(
+                        symbols.map(symbol =>
+                            axios.get(`https://query1.finance.yahoo.com/v8/finance/chart/${symbol}`)
+                        )
+                    );
+                    return responses.map((res, idx) => {
+                        const data = res.data.chart.result[0];
+                        const meta = data.meta;
+                        const quote = data.indicators.quote[0];
+                        const lastPrice = quote.close[quote.close.length - 1] || meta.previousClose;
+                        const open = quote.open[0] || meta.previousClose;
+                        return {
+                            symbol: symbols[idx],
+                            price: lastPrice,
+                            open: open,
+                            change: ((lastPrice - open) / open * 100).toFixed(2),
+                            name: meta.symbol || symbols[idx],
+                            high: quote.high?.reduce((a, b) => Math.max(a, b), lastPrice) || lastPrice,
+                            low: quote.low?.reduce((a, b) => Math.min(a, b), lastPrice) || lastPrice,
+                            volume: quote.volume?.reduce((a, b) => a + b, 0) || 0,
+                        };
+                    });
+                } catch (error) {
+                    console.error('Error fetching prices:', error);
+                    return symbols.map(sym => ({
+                        symbol: sym,
+                        price: 0,
+                        open: 0,
+                        change: '0',
+                        name: sym,
+                        high: 0,
+                        low: 0,
+                        volume: 0,
+                    }));
+                }
+            };
+
+            // Load initial stocks
+            useEffect(() => {
+                const loadStocks = async () => {
+                    setLoading(true);
+                    const data = await fetchPrices(INITIAL_STOCKS);
+                    setStocks(data);
+                    setLoading(false);
+                };
+                loadStocks();
+            }, []);
+
+            // Calculate P&L
+            const calculateTodayPL = (currentStocks) => {
+                let equityPL = 0, intradayPL = 0, optionsPL = 0;
+                
+                Object.keys(portfolio.equity).forEach(symbol => {
+                    const stock = currentStocks.find(s => s.symbol === symbol);
+                    if (stock && portfolio.equity[symbol] > 0) {
+                        equityPL += (stock.price - stock.open) * portfolio.equity[symbol];
+                    }
+                });
+
+                Object.keys(portfolio.intraday).forEach(symbol => {
+                    const stock = currentStocks.find(s => s.symbol === symbol);
+                    if (stock && portfolio.intraday[symbol] > 0) {
+                        intradayPL += (stock.price - stock.open) * portfolio.intraday[symbol] * INTRADAY_LEVERAGE;
+                    }
+                });
+
+                Object.keys(portfolio.options).forEach(symbol => {
+                    const stock = currentStocks.find(s => s.symbol === symbol);
+                    if (stock && portfolio.options[symbol] > 0) {
+                        const lotSize = optionLotSizes[symbol] || 100;
+                        optionsPL += (stock.price - stock.open) * portfolio.options[symbol] * lotSize;
+                    }
+                });
+
+                setTodayPL({ equity: equityPL, intraday: intradayPL, options: optionsPL });
+            };
+
+            // Search stock
+            const handleSearch = async () => {
+                if (!search.trim()) return;
+                setLoading(true);
+                const data = await fetchPrices([search.toUpperCase()]);
+                if (data[0] && data[0].price > 0) {
+                    setStocks(prev => {
+                        const exists = prev.some(s => s.symbol === data[0].symbol);
+                        return exists ? prev : [...prev, data[0]];
+                    });
+                } else {
+                    alert('Stock not found or invalid symbol');
+                }
+                setSearch('');
+                setLoading(false);
+            };
+
+            // Trade execution
+            const handleTrade = async (type) => {
+                if (!selectedStock) return;
+                const stock = stocks.find(s => s.symbol === selectedStock);
+                if (!stock) return;
+
+                const price = stock.price;
+                const qty = parseInt(quantity);
+                if (qty <= 0) return;
+
+                let lotSize = tradeType === 'options' ? (optionLotSizes[stock.symbol] || 100) : 1;
+                let cost = price * qty * lotSize;
+                
+                if (tradeType === 'intraday') {
+                    cost = cost / INTRADAY_LEVERAGE;
+                }
+
+                if (type === 'buy') {
+                    if (cost > balance) {
+                        alert(`Insufficient balance! Need $${cost.toFixed(2)}, have $${balance.toFixed(2)}`);
+                        return;
+                    }
+                    
+                    const sl = parseFloat(stopLoss);
+                    const tp = parseFloat(takeProfit);
+                    
+                    setBalance(balance - cost);
+                    const portfolioKey = tradeType === 'options' ? 'options' : tradeType;
+                    setPortfolio(prev => ({
+                        ...prev,
+                        [portfolioKey]: {
+                            ...prev[portfolioKey],
+                            [stock.symbol]: (prev[portfolioKey][stock.symbol] || 0) + qty,
+                        },
+                    }));
+                    
+                    // Add stop-loss/take-profit orders
+                    if (sl > 0 || tp > 0) {
+                        const newOrders = [];
+                        if (sl > 0 && sl < price) {
+                            newOrders.push({
+                                symbol: stock.symbol,
+                                type: 'stop_loss',
+                                price: sl,
+                                quantity: qty,
+                                tradeType: tradeType,
+                                status: 'active',
+                                createdAt: new Date().toISOString(),
+                            });
+                        }
+                        if (tp > 0 && tp > price) {
+                            newOrders.push({
+                                symbol: stock.symbol,
+                                type: 'take_profit',
+                                price: tp,
+                                quantity: qty,
+                                tradeType: tradeType,
+                                status: 'active',
+                                createdAt: new Date().toISOString(),
+                            });
+                        }
+                        setActiveOrders(prev => [...prev, ...newOrders]);
+                    }
+                    
+                    setTransactions(prev => [
+                        ...prev,
+                        { 
+                            type: 'BUY', 
+                            symbol: stock.symbol, 
+                            qty, 
+                            price, 
+                            cost, 
+                            tradeType,
+                            leverage: tradeType === 'intraday' ? `${INTRADAY_LEVERAGE}x` : '1x',
+                            stopLoss: sl || 'N/A',
+                            takeProfit: tp || 'N/A',
+                            time: new Date().toLocaleTimeString() 
+                        },
+                    ]);
+                    
+                    setStopLoss('');
+                    setTakeProfit('');
+                } else if (type === 'sell') {
+                    const portfolioKey = tradeType === 'options' ? 'options' : tradeType;
+                    const held = portfolio[portfolioKey][stock.symbol] || 0;
+                    if (qty > held) {
+                        alert(`You only have ${held} shares of ${stock.symbol}`);
+                        return;
+                    }
+                    
+                    setBalance(balance + cost);
+                    setPortfolio(prev => {
+                        const newHeld = prev[portfolioKey][stock.symbol] - qty;
+                        if (newHeld <= 0) {
+                            const { [stock.symbol]: _, ...rest } = prev[portfolioKey];
+                            return { ...prev, [portfolioKey]: rest };
+                        }
+                        return {
+                            ...prev,
+                            [portfolioKey]: {
+                                ...prev[portfolioKey],
+                                [stock.symbol]: newHeld,
+                            },
+                        };
+                    });
+                    
+                    setTransactions(prev => [
+                        ...prev,
+                        { 
+                            type: 'SELL', 
+                            symbol: stock.symbol, 
+                            qty, 
+                            price, 
+                            cost, 
+                            tradeType,
+                            leverage: tradeType === 'intraday' ? `${INTRADAY_LEVERAGE}x` : '1x',
+                            time: new Date().toLocaleTimeString() 
+                        },
+                    ]);
+                }
+                calculateTodayPL(stocks);
+            };
+
+            // Reset balance
+            const resetBalance = () => {
+                const newBal = prompt('Enter new virtual balance:', balance);
+                if (newBal !== null && !isNaN(newBal) && parseFloat(newBal) >= 0) {
+                    setBalance(parseFloat(newBal));
+                }
+            };
+
+            // Export CSV
+            const exportCSV = () => {
+                if (transactions.length === 0) {
+                    alert('No transactions to export');
+                    return;
+                }
+                
+                const headers = ['Type', 'Symbol', 'Quantity', 'Price', 'Cost', 'Trade Type', 'Leverage', 'Time'];
+                const csvData = transactions.map(t => 
+                    [t.type, t.symbol, t.qty, t.price.toFixed(2), t.cost.toFixed(2), t.tradeType, t.leverage || '1x', t.time]
+                );
+                
+                const csvContent = [headers.join(','), ...csvData.map(row => row.join(','))].join('\n');
+                const blob = new Blob([csvContent], { type: 'text/csv' });
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `trading_transactions_${new Date().toISOString().split('T')[0]}.csv`;
+                a.click();
+                window.URL.revokeObjectURL(url);
+            };
+
+            // Select stock
+            const selectStock = (symbol) => {
+                setSelectedStock(symbol);
+                setStopLoss('');
+                setTakeProfit('');
+            };
+
+            const totalPL = todayPL.equity + todayPL.intraday + todayPL.options;
+
+            return (
+                <div className={`min-h-screen ${darkMode ? 'dark bg-dark-bg' : 'bg-gray-100'} p-2 md:p-4`}>
+                    <div className="max-w-7xl mx-auto">
+                        {/* Header */}
+                        <div className="flex flex-wrap justify-between items-center mb-4">
+                            <h1 className="text-2xl md:text-3xl font-bold text-blue-600 dark:text-blue-400">
+                                📈 Virtual Trading Pro
+                            </h1>
+                            <div className="flex gap-2">
+                                <button
+                                    onClick={exportCSV}
+                                    className="bg-green-500 text-white px-3 py-1 rounded hover:bg-green-600 text-sm"
+                                >
+                                    📊 Export CSV
+                                </button>
+                                <button
+                                    onClick={() => setDarkMode(!darkMode)}
+                                    className="bg-gray-200 dark:bg-gray-700 px-3 py-1 rounded hover:bg-gray-300 dark:hover:bg-gray-600 text-sm"
+                                >
+                                    {darkMode ? '☀️' : '🌙'}
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* Status */}
+                        <div className="bg-white dark:bg-dark-card p-3 rounded-lg shadow mb-4 flex flex-wrap items-center gap-4">
+                            <div className="flex items-center gap-2 text-sm">
+                                <span className="font-bold">🔌 WS:</span>
+                                <span className={wsConnected ? 'text-green-600' : 'text-red-600'}>
+                                    {wsConnected ? '🟢' : '🔴'}
+                                </span>
+                            </div>
+                            <div className="flex items-center gap-2 text-sm">
+                                <span className="font-bold">⚡ Leverage:</span>
+                                <span className="text-purple-600 font-bold">{INTRADAY_LEVERAGE}x</span>
+                            </div>
+                            <button
+                                onClick={() => setShowOrders(!showOrders)}
+                                className="bg-yellow-500 text-white px-3 py-1 rounded hover:bg-yellow-600 text-sm"
+                            >
+                                📋 Orders ({activeOrders.filter(o => o.status === 'active').length})
+                            </button>
+                        </div>
+
+                        {/* Balance & P&L */}
+                        <div className="bg-white dark:bg-dark-card p-4 rounded-lg shadow mb-4">
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div>
+                                    <span className="font-bold">💰 Balance: </span>
+                                    <span className="text-xl text-green-600 dark:text-green-400">
+                                        ${balance.toFixed(2)}
+                                    </span>
+                                    <button
+                                        onClick={resetBalance}
+                                        className="ml-2 bg-blue-500 text-white px-3 py-1 rounded hover:bg-blue-600 text-sm"
+                                    >
+                                        Set Balance
+                                    </button>
+                                </div>
+                                <div>
+                                    <span className="font-bold">📊 Today's P&L: </span>
+                                    <span className={`text-xl font-bold ${totalPL >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                        ${totalPL.toFixed(2)}
+                                    </span>
+                                </div>
+                            </div>
+                            
+                            {/* P&L Breakdown */}
+                            <div className="grid grid-cols-3 gap-2 mt-2 text-sm">
+                                <div className="bg-gray-50 dark:bg-gray-800 p-2 rounded">
+                                    <span className="font-bold">Equity</span>
+                                    <span className={`ml-2 ${todayPL.equity >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                        ${todayPL.equity.toFixed(2)}
+                                    </span>
+                                </div>
+                                <div className="bg-gray-50 dark:bg-gray-800 p-2 rounded">
+                                    <span className="font-bold">Intraday 5x</span>
+                                    <span className={`ml-2 ${todayPL.intraday >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                        ${todayPL.intraday.toFixed(2)}
+                                    </span>
+                                </div>
+                                <div className="bg-gray-50 dark:bg-gray-800 p-2 rounded">
+                                    <span className="font-bold">Options</span>
+                                    <span className={`ml-2 ${todayPL.options >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                        ${todayPL.options.toFixed(2)}
+                                    </span>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Orders */}
+                        {showOrders && (
+                            <div className="bg-white dark:bg-dark-card p-4 rounded-lg shadow mb-4">
+                                <div className="flex justify-between items-center mb-2">
+                                    <h2 className="text-xl font-semibold">📋 Active Orders</h2>
+                                    <button onClick={() => setShowOrders(false)} className="text-gray-500">✕</button>
+                                </div>
+                                {activeOrders.filter(o => o.status === 'active').length === 0 ? (
+                                    <p className="text-gray-500">No active orders</p>
+                                ) : (
+                                    <div className="space-y-2">
+                                        {activeOrders.filter(o => o.status === 'active').map((order, i) => (
+                                            <div key={i} className="bg-gray-50 dark:bg-gray-800 p-2 rounded flex flex-wrap justify-between items-center text-sm">
+                                                <span className="font-bold">{order.symbol}</span>
+                                                <span className={order.type === 'stop_loss' ? 'text-red-600' : 'text-green-600'}>
+                                                    {order.type === 'stop_loss' ? '🛑 SL' : '🎯 TP'}
+                                                </span>
+                                                <span>${order.price.toFixed(2)}</span>
+                                                <span>Qty: {order.quantity}</span>
+                                                <span className="text-xs text-gray-500">{order.tradeType}</span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        {/* Search */}
+                        <div className="bg-white dark:bg-dark-card p-4 rounded-lg shadow mb-4">
+                            <div className="flex gap-2">
+                                <input
+                                    type="text"
+                                    placeholder="Search stock (e.g., TSLA)"
+                                    value={search}
+                                    onChange={(e) => setSearch(e.target.value)}
+                                    onKeyPress={(e) => e.key === 'Enter' && handleSearch()}
+                                    className="flex-1 border dark:bg-gray-800 dark:border-gray-700 p-2 rounded text-sm"
+                                />
+                                <button
+                                    onClick={handleSearch}
+                                    className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 text-sm whitespace-nowrap"
+                                >
+                                    Add Stock
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* Stock List */}
+                        <div className="bg-white dark:bg-dark-card p-4 rounded-lg shadow mb-4 overflow-x-auto">
+                            <h2 className="text-xl font-semibold mb-2">📋 Stocks</h2>
+                            {loading && <p>Loading...</p>}
+                            <div className="min-w-[600px] md:min-w-full">
+                                <table className="w-full text-xs md:text-sm">
+                                    <thead className="bg-gray-50 dark:bg-gray-800">
+                                        <tr>
+                                            <th className="p-2 text-left">Symbol</th>
+                                            <th className="p-2 text-left">Price</th>
+                                            <th className="p-2 text-left">Change</th>
+                                            <th className="p-2 text-left hidden md:table-cell">Lot</th>
+                                            <th className="p-2 text-left">Action</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {stocks.map((stock) => (
+                                            <tr key={stock.symbol} className="border-b dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800">
+                                                <td className="p-2 font-bold">{stock.symbol}</td>
+                                                <td className="p-2">${stock.price.toFixed(2)}</td>
+                                                <td className={`p-2 ${stock.change >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                                    {stock.change}%
+                                                </td>
+                                                <td className="p-2 hidden md:table-cell font-bold text-blue-600">
+                                                    {optionLotSizes[stock.symbol] || 'N/A'}
+                                                </td>
+                                                <td className="p-2">
+                                                    <button
+                                                        onClick={() => selectStock(stock.symbol)}
+                                                        className="bg-blue-500 text-white px-2 py-1 md:px-3 md:py-1 rounded hover:bg-blue-600 text-xs"
+                                                    >
+                                                        Trade
+                                                    </button>
+                                                </td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        {/* Trade Panel */}
+                        {selectedStock && (
+                            <div className="bg-white dark:bg-dark-card p-4 rounded-lg shadow mb-4 border-2 border-blue-200 dark:border-blue-800">
+                                <h2 className="text-xl font-semibold mb-2">
+                                    Trade {selectedStock} (${stocks.find(s => s.symbol === selectedStock)?.price.toFixed(2) || '?'})
+                                </h2>
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    <div>
+                                        <label className="block text-sm font-medium">Quantity</label>
+                                        <input
+                                            type="number"
+                                            min="1"
+                                            value={quantity}
+                                            onChange={(e) => setQuantity(e.target.value)}
+                                            className="w-full border dark:bg-gray-800 dark:border-gray-700 p-2 rounded"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-medium">Trade Type</label>
+                                        <select
+                                            value={tradeType}
+                                            onChange={(e) => setTradeType(e.target.value)}
+                                            className="w-full border dark:bg-gray-800 dark:border-gray-700 p-2 rounded"
+                                        >
+                                            <option value="equity">Equity (1x)</option>
+                                            <option value="intraday">Intraday (5x)</option>
+                                            <option value="options">Options (Lot: {optionLotSizes[selectedStock] || 100})</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-medium">Stop Loss ($)</label>
+                                        <input
+                                            type="number"
+                                            placeholder="E.g., 150"
+                                            value={stopLoss}
+                                            onChange={(e) => setStopLoss(e.target.value)}
+                                            className="w-full border dark:bg-gray-800 dark:border-gray-700 p-2 rounded"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-medium">Take Profit ($)</label>
+                                        <input
+                                            type="number"
+                                            placeholder="E.g., 200"
+                                            value={takeProfit}
+                                            onChange={(e) => setTakeProfit(e.target.value)}
+                                            className="w-full border dark:bg-gray-800 dark:border-gray-700 p-2 rounded"
+                                        />
+                                    </div>
+                                </div>
+                                <div className="mt-2">
+                                    <div className="bg-gray-50 dark:bg-gray-800 p-2 rounded text-sm">
+                                        <span className="font-bold">Estimated Cost: </span>
+                                        ${(() => {
+                                            const price = stocks.find(s => s.symbol === selectedStock)?.price || 0;
+                                            const qty = parseInt(quantity) || 0;
+                                            let cost = price * qty;
+                                            if (tradeType === 'options') {
+                                                cost = cost * (optionLotSizes[selectedStock] || 100);
+                                            }
+                                            if (tradeType === 'intraday') {
+                                                cost = cost / INTRADAY_LEVERAGE;
+                                            }
+                                            return cost.toFixed(2);
+                                        })()}
+                                    </div>
+                                </div>
+                                <div className="grid grid-cols-2 gap-2 mt-2">
+                                    <button
+                                        onClick={() => handleTrade('buy')}
+                                        className="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600"
+                                    >
+                                        Buy
+                                    </button>
+                                    <button
+                                        onClick={() => handleTrade('sell')}
+                                        className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600"
+                                    >
+                                        Sell
+                                    </button>
+                                </div>
+                                <div className="mt-2 text-sm">
+                                    <div>Held: {portfolio[tradeType === 'options' ? 'options' : tradeType]?.[selectedStock] || 0} units</div>
+                                    {tradeType === 'intraday' && <div className="text-purple-600">⚡ {INTRADAY_LEVERAGE}x Leverage</div>}
+                                    {tradeType === 'options' && <div className="text-blue-600">📦 Lot Size: {optionLotSizes[selectedStock] || 100}</div>}
+                                    {(stopLoss || takeProfit) && (
+                                        <div className="text-yellow-600">
+                                            🛑 SL: ${stopLoss || 'N/A'} | 🎯 TP: ${takeProfit || 'N/A'}
+                                        </div>
+                                    )}
+                                </div>
+                                <button
+                                    onClick={() => setSelectedStock(null)}
+                                    className="mt-2 bg-gray-300 dark:bg-gray-700 px-4 py-1 rounded hover:bg-gray-400 dark:hover:bg-gray-600 text-sm"
+                                >
+                                    Close
+                                </button>
+                            </div>
+                        )}
+
+                        {/* Portfolio */}
+                        <div className="bg-white dark:bg-dark-card p-4 rounded-lg shadow mb-4">
+                            <h2 className="text-xl font-semibold mb-2">📦 Portfolio</h2>
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                <div>
+                                    <h3 className="font-bold text-blue-600">Equity</h3>
+                                    {Object.keys(portfolio.equity).length === 0 ? (
+                                        <p className="text-gray-500 text-sm">No holdings</p>
+                                    ) : (
+                                        Object.entries(portfolio.equity).map(([symbol, qty]) => (
+                                            <div key={symbol} className="bg-gray-50 dark:bg-gray-800 p-2 rounded text-sm mb-1">
+                                                <span className="font-bold">{symbol}</span>: {qty} shares
+                                            </div>
+                                        ))
+                                    )}
+                                </div>
+                                <div>
+                                    <h3 className="font-bold text-purple-600">Intraday (5x)</h3>
+                                    {Object.keys(portfolio.intraday).length === 0 ? (
+                                        <p className="text-gray-500 text-sm">No holdings</p>
+                                    ) : (
+                                        Object.entries(portfolio.intraday).map(([symbol, qty]) => (
+                                            <div key={symbol} className="bg-gray-50 dark:bg-gray-800 p-2 rounded text-sm mb-1">
+                                                <span className="font-bold">{symbol}</span>: {qty} ⚡
+                                            </div>
+                                        ))
+                                    )}
+                                </div>
+                                <div>
+                                    <h3 className="font-bold text-orange-600">Options</h3>
+                                    {Object.keys(portfolio.options).length === 0 ? (
+                                        <p className="text-gray-500 text-sm">No holdings</p>
+                                    ) : (
+                                        Object.entries(portfolio.options).map(([symbol, qty]) => (
+                                            <div key={symbol} className="bg-gray-50 dark:bg-gray-800 p-2 rounded text-sm mb-1">
+                                                <span className="font-bold">{symbol}</span>: {qty} contracts
+                                            </div>
+                                        ))
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Transactions */}
+                        <div className="bg-white dark:bg-dark-card p-4 rounded-lg shadow">
+                            <h2 className="text-xl font-semibold mb-2">📜 Transactions</h2>
+                            <div className="max-h-60 overflow-y-auto text-sm">
+                                {transactions.length === 0 ? (
+                                    <p className="text-gray-500">No transactions yet</p>
+                                ) : (
+                                    transactions.slice().reverse().map((t, i) => (
+                                        <div key={i} className="border-b dark:border-gray-700 py-2">
+                                            <div className="flex flex-wrap gap-2">
+                                                <span className={`font-bold ${t.type === 'BUY' ? 'text-green-600' : t.type === 'SELL' ? 'text-red-600' : 'text-yellow-600'}`}>
+                                                    {t.type}
+                                                </span>
+                                                <span className="font-bold">{t.symbol}</span>
+                                                <span>{t.qty} @ ${t.price.toFixed(2)}</span>
+                                                <span className="text-gray-500">${t.cost.toFixed(2)}</span>
+                                                <span className="text-purple-600">{t.tradeType}</span>
+                                                {t.leverage && <span className="text-orange-600">{t.leverage}</span>}
+                                                {t.stopLoss && <span className="text-red-600">SL: ${t.stopLoss}</span>}
+                                                {t.takeProfit && <span className="text-green-600">TP: ${t.takeProfit}</span>}
+                                                <span className="text-gray-400 text-xs">{t.time}</span>
+                                            </div>
+                                        </div>
+                                    ))
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        ReactDOM.createRoot(document.getElementById('root')).render(<App />);
     </script>
 </body>
 </html>
