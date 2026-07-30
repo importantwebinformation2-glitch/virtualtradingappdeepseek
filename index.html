@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Virtual Trading Pro</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { background: #f3f4f6; font-family: system-ui; }
+        .card { background: white; border-radius: 12px; padding: 20px; margin: 12px; }
+        .btn { background: #2563eb; color: white; padding: 8px 16px; border-radius: 6px; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+    <script type="module">
+        // Your app code goes here
+        // (I can provide the complete single-file version if needed)
+        document.getElementById('root').innerHTML = `
+            <div style="padding: 20px; max-width: 500px; margin: auto;">
+                <h1>📈 Virtual Trading Pro</h1>
+                <div class="card">💰 Balance: $100,000.00</div>
+                <div class="card">📊 Today's P&L: $0.00</div>
+                <p style="text-align: center; margin: 20px;">
+                    App loading... Please wait.
+                </p>
+            </div>
+        `;
+        console.log('Trading app loaded!');
+    </script>
+</body>
+</html>
